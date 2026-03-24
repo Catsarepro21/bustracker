@@ -1,0 +1,18 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environment
+venv/
+.venv/
+
+# Secrets — do NOT commit
+.env
+
+# Runtime files (auto-created by the app)
+subscriptions.json
+
+# OS
+.DS_Store
+Thumbs.db
