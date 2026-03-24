@@ -1,15 +1,17 @@
 import os
+import re
 import json
 import time
+import requests
 import threading
 import logging
+from typing import Any
+from bs4 import BeautifulSoup
 from dotenv import load_dotenv
 from flask import Flask, request, jsonify, send_from_directory
 from flask_cors import CORS
 from geopy.distance import distance as geo_distance
 from pywebpush import webpush, WebPushException
-from pyhctb.api import HctbApi
-from selenium import webdriver
 
 load_dotenv()
 
@@ -28,25 +30,6 @@ VAPID_CLAIM_EMAIL = os.getenv('VAPID_CLAIM_EMAIL', 'mailto:admin@bustracker.app'
 POLL_INTERVAL = int(os.getenv('POLL_INTERVAL_SECONDS', '60'))
 SUBSCRIPTIONS_FILE = 'subscriptions.json'
 PORT = int(os.getenv('PORT', '5000'))
-
-# Optional: set CHROME_BINARY on Railway to point at the nixpkgs chromium binary.
-# Leave unset for local development — Chrome/Chromium on PATH is used automatically.
-CHROME_BINARY = os.getenv('CHROME_BINARY', None)
-
-def _make_chrome_options():
-    """Chrome options that work both locally and in containers (Railway/Docker)."""
-    opts = webdriver.ChromeOptions()
-    opts.add_argument('--headless')
-    opts.add_argument('--no-sandbox')            # Required in containers
-    opts.add_argument('--disable-dev-shm-usage') # Avoids /dev/shm OOM in containers
-    opts.add_argument('--disable-gpu')
-    opts.add_argument('--disable-setuid-sandbox')
-    opts.add_argument('--disable-logging')
-    opts.add_argument('--log-level=3')
-    if CHROME_BINARY:
-        opts.binary_location = CHROME_BINARY
-    return opts
-
 
 # ---------------------------------------------------------------------------
 # Flask App
@@ -94,11 +77,88 @@ def broadcast_push(title, body, url='/'):
     for sub in subs:
         threading.Thread(target=send_push, args=(sub, title, body, url), daemon=True).start()
 
+
+# ---------------------------------------------------------------------------
+# Lightweight HCTB API Client (No Selenium required!)
+# ---------------------------------------------------------------------------
+class LightweightHctbClient:
+    def __init__(self, username, password, code):
+        self.username = username
+        self.password = password
+        self.code = code
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+        })
+        self.base_url = "https://login.herecomesthebus.com"
+        self.auth_url = f"{self.base_url}/Authenticate.aspx"
+        self.map_url = f"{self.base_url}/Map.aspx"
+        self.refresh_url = f"{self.map_url}/RefreshMap"
+
+    def login_and_get_data(self):
+        # 1. Get Login Page & parse ASP.NET hidden fields
+        resp = self.session.get(self.auth_url)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+
+        data = {}
+        for ele in soup.find_all('input', type='hidden'):
+            if ele.get('name'):
+                data[ele.get('name')] = ele.get('value', '')
+
+        data['ctl00$ctl00$cphWrapper$cphContent$tbxAccountNumber'] = self.code
+        data['ctl00$ctl00$cphWrapper$cphContent$tbxUserName'] = self.username
+        data['ctl00$ctl00$cphWrapper$cphContent$tbxPassword'] = self.password
+        data['ctl00$ctl00$cphWrapper$cphContent$btnAuthenticate'] = 'Log In'
+
+        # 2. Submit Login
+        self.session.post(self.auth_url, data=data)
+
+        if '.ASPXFORMSAUTH' not in self.session.cookies:
+            raise Exception("Login failed. Check credentials.")
+
+        # 3. GET Map page to parse passenger IDs
+        resp = self.session.get(self.map_url)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        
+        options = soup.find_all('option', selected="selected")
+        if len(options) < 3:
+            raise Exception("Could not find active passenger on Map.")
+
+        legacy_id = options[1].get('value')
+        time_id = options[2].get('value')
+        
+        payload = {
+            "legacyID": legacy_id,
+            "name": options[1].text,
+            "timeSpanId": time_id,
+            "wait": "false"
+        }
+
+        # 4. POST RefreshMap for bus coordinates
+        headers = {
+            "Accept": "application/json, text/javascript, */*; q=0.01",
+            "Content-Type": "application/json; charset=UTF-8",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": self.map_url
+        }
+        res = self.session.post(self.refresh_url, json=payload, headers=headers)
+        
+        if not res.ok:
+            raise Exception(f"Map API returned {res.status_code}")
+            
+        json_data = res.json().get('d', '')
+        # Parse SetBusPushPin(lat, lon, ...)
+        match = re.search(r"SetBusPushPin\(([-+]?\d*\.?\d+),\s*([-+]?\d*\.?\d+)", json_data)
+        if match:
+            return float(match.group(1)), float(match.group(2))
+        return None, None
+
+
 # ---------------------------------------------------------------------------
 # HCTB Polling background thread
 # ---------------------------------------------------------------------------
 # Shared state
-bus_state = {
+bus_state: dict[str, Any] = {
     "latitude": None,
     "longitude": None,
     "distance_miles": None,
@@ -114,25 +174,22 @@ def polling_loop():
         log.error("HCTB credentials not set. Polling disabled.")
         return
 
-    client = HctbApi(HCTB_EMAIL, HCTB_PASSWORD, HCTB_SCHOOL_CODE)
-    client.browser_options = _make_chrome_options()  # Override with container-safe options
-    log.info("HCTB polling thread started.")
+    client = LightweightHctbClient(HCTB_EMAIL, HCTB_PASSWORD, HCTB_SCHOOL_CODE)
+    log.info("HCTB lightweight polling thread started (No Selenium required!)")
 
     while True:
         try:
             log.info("Fetching bus data from HCTB...")
-            data = client.get_bus_data()
-            lat = data.get('latitude')
-            lon = data.get('longitude')
+            lat, lon = client.login_and_get_data()
 
             if lat and lon:
-                bus_coords = (float(lat), float(lon))
+                bus_coords = (lat, lon)
                 school_coords = (SCHOOL_LAT, SCHOOL_LON)
                 dist = geo_distance(bus_coords, school_coords).miles
 
                 bus_state.update({
-                    "latitude": float(lat),
-                    "longitude": float(lon),
+                    "latitude": lat,
+                    "longitude": lon,
                     "distance_miles": round(dist, 2),
                     "in_school_zone": dist <= RADIUS_MILES,
                     "last_updated": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime()),
@@ -158,6 +215,7 @@ def polling_loop():
             bus_state.update({"error": str(e), "last_updated": time.strftime('%Y-%m-%dT%H:%M:%SZ', time.gmtime())})
 
         time.sleep(POLL_INTERVAL)
+
 
 # ---------------------------------------------------------------------------
 # Routes

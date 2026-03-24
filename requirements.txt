@@ -1,8 +1,8 @@
 flask
 flask-cors
-pyhctb
 geopy
 pywebpush
 python-dotenv
+beautifulsoup4
 requests
 gunicorn
