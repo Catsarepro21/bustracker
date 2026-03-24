@@ -1,0 +1,8 @@
+flask
+flask-cors
+pyhctb
+geopy
+pywebpush
+python-dotenv
+requests
+gunicorn
