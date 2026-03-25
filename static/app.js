@@ -141,6 +141,15 @@ function updateUI(data) {
         zoneBadge.textContent = 'Bus not active';
         zoneBadge.classList.remove('in-zone');
         showError(data.error);
+    } else {
+        // Null state — server just started, first poll hasn't completed yet
+        distanceEl.textContent = '—';
+        distanceUnit.textContent = '';
+        statusDot.className = 'status-dot';
+        zoneFill.style.width = '0%';
+        zoneBadge.textContent = 'Starting up…';
+        zoneBadge.classList.remove('in-zone');
+        hideError();
     }
 }
 

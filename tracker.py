@@ -171,7 +171,9 @@ already_notified = False
 def polling_loop():
     global already_notified
     if not all([HCTB_EMAIL, HCTB_PASSWORD, HCTB_SCHOOL_CODE]):
-        log.error("HCTB credentials not set. Polling disabled.")
+        msg = "HCTB credentials not configured. Set HCTB_EMAIL, HCTB_PASSWORD, HCTB_SCHOOL_CODE."
+        log.error(msg)
+        bus_state["error"] = msg
         return
 
     client = LightweightHctbClient(HCTB_EMAIL, HCTB_PASSWORD, HCTB_SCHOOL_CODE)
@@ -279,7 +281,10 @@ def api_test_push():
 # ---------------------------------------------------------------------------
 # Startup
 # ---------------------------------------------------------------------------
+# Start background polling thread when module loads.
+# This works with both `python tracker.py` AND gunicorn (which imports the module).
+poll_thread = threading.Thread(target=polling_loop, daemon=True)
+poll_thread.start()
+
 if __name__ == '__main__':
-    poll_thread = threading.Thread(target=polling_loop, daemon=True)
-    poll_thread.start()
     app.run(host='0.0.0.0', port=PORT, debug=False)
