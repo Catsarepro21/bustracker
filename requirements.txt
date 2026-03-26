@@ -4,5 +4,5 @@ geopy
 pywebpush
 python-dotenv
 beautifulsoup4
-requests
+cloudscraper
 gunicorn
