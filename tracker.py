@@ -93,8 +93,10 @@ class LightweightHctbClient:
         self.auth_url = f"{self.base_url}/Authenticate.aspx"
         self.map_url = f"{self.base_url}/Map.aspx"
         self.refresh_url = f"{self.map_url}/RefreshMap"
+        self.logged_in = False
 
-    def login_and_get_data(self):
+    def login(self):
+        """Authenticate and store the session cookie. Raises on failure."""
         # 1. Get Login Page & parse ASP.NET hidden fields
         resp = self.session.get(self.auth_url)
         soup = BeautifulSoup(resp.text, 'html.parser')
@@ -113,19 +115,31 @@ class LightweightHctbClient:
         self.session.post(self.auth_url, data=data)
 
         if '.ASPXFORMSAUTH' not in self.session.cookies:
+            self.logged_in = False
             raise Exception("Login failed. Check credentials.")
 
+        self.logged_in = True
+        log.info("HCTB login successful.")
+
+    def get_bus_data(self):
+        """Fetch bus coordinates using the existing session. Returns (lat, lon) or (None, None)."""
         # 3. GET Map page to parse passenger IDs
         resp = self.session.get(self.map_url)
+
+        # Detect redirect back to login (session expired)
+        if self.auth_url in resp.url or '.ASPXFORMSAUTH' not in self.session.cookies:
+            self.logged_in = False
+            raise Exception("Session expired. Re-login required.")
+
         soup = BeautifulSoup(resp.text, 'html.parser')
-        
+
         options = soup.find_all('option', selected="selected")
         if len(options) < 3:
             raise Exception("Could not find active passenger on Map.")
 
         legacy_id = options[1].get('value')
         time_id = options[2].get('value')
-        
+
         payload = {
             "legacyID": legacy_id,
             "name": options[1].text,
@@ -138,13 +152,13 @@ class LightweightHctbClient:
             "Accept": "application/json, text/javascript, */*; q=0.01",
             "Content-Type": "application/json; charset=UTF-8",
             "X-Requested-With": "XMLHttpRequest",
-            "Referer": self.map_url
+            "Referer": self.map_url,
         }
         res = self.session.post(self.refresh_url, json=payload, headers=headers)
-        
+
         if not res.ok:
             raise Exception(f"Map API returned {res.status_code}")
-            
+
         json_data = res.json().get('d', '')
         # Parse SetBusPushPin(lat, lon, ...)
         match = re.search(r"SetBusPushPin\(([-+]?\d*\.?\d+),\s*([-+]?\d*\.?\d+)", json_data)
@@ -180,8 +194,22 @@ def polling_loop():
 
     while True:
         try:
+            # Log in once; re-login automatically if the session expires.
+            if not client.logged_in:
+                log.info("Logging in to HCTB...")
+                client.login()
+
             log.info("Fetching bus data from HCTB...")
-            lat, lon = client.login_and_get_data()
+            try:
+                lat, lon = client.get_bus_data()
+            except Exception as fetch_err:
+                # If the session expired mid-run, force a fresh login and retry once.
+                if not client.logged_in:
+                    log.warning(f"Session expired ({fetch_err}). Re-logging in...")
+                    client.login()
+                    lat, lon = client.get_bus_data()
+                else:
+                    raise
 
             if lat and lon:
                 bus_coords = (lat, lon)
