@@ -2,7 +2,7 @@ import os
 import re
 import json
 import time
-import cloudscraper
+from curl_cffi import requests
 import threading
 import logging
 from typing import Any
@@ -86,9 +86,7 @@ class LightweightHctbClient:
         self.username = username
         self.password = password
         self.code = code
-        self.session = cloudscraper.create_scraper(
-            browser={'browser': 'chrome', 'platform': 'windows', 'mobile': False}
-        )
+        self.session = requests.Session(impersonate="chrome120")
         self.base_url = "https://login.herecomesthebus.com"
         self.auth_url = f"{self.base_url}/Authenticate.aspx"
         self.map_url = f"{self.base_url}/Map.aspx"
